@@ -254,6 +254,25 @@ def compute_r_mode(df: pd.DataFrame, components: pd.DataFrame) -> pd.DataFrame:
         & (components["credit_proxy_score"] < 12)
     )
 
+    # R7.2: credit-crisis-only anti-whipsaw gate.
+    # R7.1 applied the 2008-style credit gate to every panic, which made 2020 too slow.
+    # R7.2 only arms the gate when credit has suffered a deep/prolonged drawdown.
+    # 2008 should be gated; 2020 should keep the fast V-rebound lane.
+    credit_252d_high = credit.rolling(252, min_periods=60).max()
+    credit_drawdown_252d = credit / credit_252d_high - 1.0
+    recent_deep_credit_drawdown = credit_drawdown_252d.rolling(90, min_periods=10).min() <= -0.18
+    conds["credit_crisis_regime"] = conds["fast_panic_regime"] & recent_deep_credit_drawdown
+    conds["fast_release_safe"] = (
+        conds["fast_release_confirm"]
+        & (
+            (~conds["credit_crisis_regime"])
+            | (
+                (components["total_score"] < 75)
+                & (components["credit_proxy_score"] < 12)
+            )
+        )
+    )
+
     # R7: stricter medium repair lane.
     # For 2018 Q4-like corrections: VIX and score were elevated, but not a full 2020-style panic.
     # R7 tightens R6 to avoid 2022-style bear-market rallies: momentum repair is mandatory, not just part of a score count.
@@ -335,6 +354,8 @@ def apply_cooldown(weekly: pd.DataFrame, cooldown_weeks: int = 3) -> pd.DataFram
         r_confirm = bool(row.get("r_confirm", False))
         release_confirm = bool(row.get("release_confirm", False))
         fast_release_confirm = bool(row.get("fast_release_confirm", False))
+        fast_release_safe = bool(row.get("fast_release_safe", fast_release_confirm))
+        credit_crisis_regime = bool(row.get("credit_crisis_regime", False))
         fast_r_confirm = bool(row.get("fast_r_confirm", False))
         medium_release_confirm = bool(row.get("medium_release_confirm", False))
 
@@ -351,7 +372,7 @@ def apply_cooldown(weekly: pd.DataFrame, cooldown_weeks: int = 3) -> pd.DataFram
             medium_release_pending_count = 0
             reason = "風險分數>=75，立即切514防守"
 
-        elif current == "514" and fast_release_confirm:
+        elif current == "514" and fast_release_safe:
             # R5 fast lane: after a true panic regime, allow earlier release from 514 to 452.
             pending = None
             pending_count = 0
@@ -360,7 +381,7 @@ def apply_cooldown(weekly: pd.DataFrame, cooldown_weeks: int = 3) -> pd.DataFram
             if fast_release_pending_count >= 1:
                 current = "452"
                 release_pending_count = 0
-                reason = "V型急殺後快速回攻通道成立，514→452"
+                reason = "R7.2快速回攻安全條件成立，514→452"
             else:
                 reason = f"快速回攻第{fast_release_pending_count}週觀察，暫維持514"
 
@@ -509,7 +530,7 @@ def make_switch_log(weekly: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "total_score", "final_mode", "raw_mode", "r_count", "r_watch", "r_confirm",
         "r_credit_veto", "r_momentum_veto", "r_score_veto", "release_confirm",
-        "fast_count", "fast_release_confirm", "fast_r_confirm",
+        "fast_count", "fast_release_confirm", "fast_release_safe", "credit_crisis_regime", "fast_r_confirm",
         "medium_repair_regime", "medium_count", "medium_release_confirm",
         "release_qqq_above_ma60", "release_soxx_above_ma60", "release_credit_above_ma60",
         "market_momentum_score", "credit_proxy_score", "breadth_score", "vix_score",
@@ -531,7 +552,7 @@ def make_summary(weekly: pd.DataFrame, switch_log: pd.DataFrame, start: str, end
         return pd.Timestamp(x).strftime("%Y-%m-%d")
 
     lines = []
-    lines.append("# V11-Core 2015-2016 China/RMB Shock Backtest R7 Summary")
+    lines.append("# V11-Core 2015-2016 China/RMB Shock Backtest R7.2 Summary")
     lines.append("")
     lines.append(f"Period: {start} to {end}")
     lines.append("")
